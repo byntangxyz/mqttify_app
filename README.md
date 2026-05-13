@@ -22,7 +22,7 @@ You can grab the latest production-ready Android APK release directly provided i
 3. Connect your Android device to the corresponding Wi-Fi network hosting your MQTT Server.
 4. Launch the **MQTTify** app!
 
-## Build it Yourself & Change the App Icon
+## Build it Yourself
 
 If you want to pull this code from GitHub and compile the debug / release app on your own machine:
 
