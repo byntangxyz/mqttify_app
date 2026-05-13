@@ -1,59 +1,411 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 
-void main() {
-  runApp(const SmartLampApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  runApp(SmartDeviceApp(prefs: prefs));
 }
 
-class SmartLampApp extends StatelessWidget {
-  const SmartLampApp({super.key});
+class SmartDeviceApp extends StatelessWidget {
+  final SharedPreferences prefs;
+  const SmartDeviceApp({super.key, required this.prefs});
 
   @override
   Widget build(BuildContext context) {
+    bool hasSettings = prefs.getString('mqtt_ip') != null;
     return MaterialApp(
-      title: 'Smart Lamp',
+      title: 'MQTTify',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.amber),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blueAccent,
+          brightness: Brightness.dark,
+        ),
         useMaterial3: true,
       ),
-      home: const LampControlPage(),
+      home: hasSettings
+          ? DeviceControlPage(prefs: prefs)
+          : SettingsPage(prefs: prefs),
     );
   }
 }
 
-class LampControlPage extends StatefulWidget {
-  const LampControlPage({super.key});
+// ---------------------------------------------------------
+// SCREENS
+// ---------------------------------------------------------
+
+class SettingsPage extends StatefulWidget {
+  final SharedPreferences prefs;
+  const SettingsPage({super.key, required this.prefs});
 
   @override
-  State<LampControlPage> createState() => _LampControlPageState();
+  State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _LampControlPageState extends State<LampControlPage> {
-  // MQTT Setup
-  late MqttServerClient client;
-  final String controlTopic = 'smartlamp/control';
-  final String statusTopic = 'smartlamp/status';
+class _SettingsPageState extends State<SettingsPage> {
+  final _ipController = TextEditingController();
+  final _controlTopicController = TextEditingController();
+  final _statusTopicController = TextEditingController();
 
-  bool isConnected = false;
-  bool isLampOn = false;
-  String connectionStatus = 'Disconnected';
+  bool _testingConnection = false;
+  bool _connectionSuccess = false;
+  int _selectedIconIndex = 0;
+
+  final List<IconData> _deviceIcons = [
+    Icons.lightbulb_outline,
+    Icons.power,
+    Icons.tv,
+    Icons.ac_unit,
+    Icons.router,
+    Icons.desktop_windows,
+  ];
 
   @override
   void initState() {
     super.initState();
-    client = MqttServerClient(
-      '10.80.80.218',
-      'smartlamp_app_client_${DateTime.now().millisecondsSinceEpoch}',
+    _ipController.text = widget.prefs.getString('mqtt_ip') ?? '';
+    _controlTopicController.text =
+        widget.prefs.getString('control_topic') ?? 'smartlamp/control';
+    _statusTopicController.text =
+        widget.prefs.getString('status_topic') ?? 'smartlamp/status';
+    _selectedIconIndex = widget.prefs.getInt('device_icon') ?? 0;
+    if (_ipController.text.isNotEmpty) {
+      _connectionSuccess = true;
+    }
+  }
+
+  Future<void> _testConnection() async {
+    if (_ipController.text.isEmpty) return;
+
+    setState(() {
+      _testingConnection = true;
+      _connectionSuccess = false;
+    });
+
+    final client = MqttServerClient(
+      _ipController.text,
+      'test_client_${DateTime.now().millisecondsSinceEpoch}',
     );
+    client.port = 1883;
+    client.logging(on: false);
+    client.keepAlivePeriod = 10;
+
+    final connMess = MqttConnectMessage()
+        .withClientIdentifier(
+          'test_client_${DateTime.now().millisecondsSinceEpoch}',
+        )
+        .withWillQos(MqttQos.atLeastOnce);
+    client.connectionMessage = connMess;
+
+    try {
+      await client.connect().timeout(const Duration(seconds: 5));
+    } catch (e) {
+      debugPrint('Connection failed: $e');
+      client.disconnect();
+    }
+
+    setState(() {
+      _testingConnection = false;
+      if (client.connectionStatus?.state == MqttConnectionState.connected) {
+        _connectionSuccess = true;
+        client.disconnect();
+        Fluttertoast.showToast(
+          msg: 'Connection Successful!',
+          backgroundColor: Colors.green,
+          textColor: Colors.white,
+        );
+      } else {
+        _connectionSuccess = false;
+        Fluttertoast.showToast(
+          msg: 'Connection Failed. Please check IP.',
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
+        );
+      }
+    });
+  }
+
+  void _saveSettings() async {
+    if (!_connectionSuccess) {
+      Fluttertoast.showToast(
+        msg: 'Please test connection successfully first.',
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+      );
+      return;
+    }
+    if (_controlTopicController.text.isEmpty ||
+        _statusTopicController.text.isEmpty) {
+      Fluttertoast.showToast(
+        msg: 'Topics cannot be empty.',
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+      );
+      return;
+    }
+
+    await widget.prefs.setString('mqtt_ip', _ipController.text);
+    await widget.prefs.setString('control_topic', _controlTopicController.text);
+    await widget.prefs.setString('status_topic', _statusTopicController.text);
+    await widget.prefs.setInt('device_icon', _selectedIconIndex);
+
+    if (mounted) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (context) => DeviceControlPage(prefs: widget.prefs),
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _ipController.dispose();
+    _controlTopicController.dispose();
+    _statusTopicController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('App Settings'), centerTitle: true),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'MQTT Setup',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _ipController,
+              decoration: InputDecoration(
+                labelText: 'MQTT Broker IP Address',
+                hintText: 'e.g. 10.80.80.218',
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                prefixIcon: const Icon(Icons.wifi),
+              ),
+              keyboardType: TextInputType.number,
+              onChanged: (val) {
+                setState(() {
+                  _connectionSuccess = false;
+                });
+              },
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton.icon(
+                onPressed: _testingConnection || _ipController.text.isEmpty
+                    ? null
+                    : _testConnection,
+                icon: _testingConnection
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        _connectionSuccess
+                            ? Icons.check_circle
+                            : Icons.network_ping,
+                      ),
+                label: Text(
+                  _connectionSuccess
+                      ? 'Connection Verified'
+                      : 'Test Connection',
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _connectionSuccess
+                      ? Colors.green
+                      : Colors.blueAccent,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ),
+
+            AnimatedOpacity(
+              opacity: _connectionSuccess ? 1.0 : 0.4,
+              duration: const Duration(milliseconds: 300),
+              child: IgnorePointer(
+                ignoring: !_connectionSuccess,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 32),
+                    const Divider(),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Device Configuration',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _controlTopicController,
+                      decoration: InputDecoration(
+                        labelText: 'Control Topic',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        prefixIcon: const Icon(Icons.send),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _statusTopicController,
+                      decoration: InputDecoration(
+                        labelText: 'Status Topic',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        prefixIcon: const Icon(Icons.mark_email_read),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    const Text(
+                      'Select Device Icon',
+                      style: TextStyle(fontSize: 16),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height: 70,
+                      child: ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _deviceIcons.length,
+                        itemBuilder: (context, index) {
+                          final isSelected = index == _selectedIconIndex;
+                          return GestureDetector(
+                            onTap: () =>
+                                setState(() => _selectedIconIndex = index),
+                            child: Container(
+                              margin: const EdgeInsets.only(right: 12),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: isSelected
+                                    ? Colors.blueAccent.withOpacity(0.2)
+                                    : Colors.transparent,
+                                border: Border.all(
+                                  color: isSelected
+                                      ? Colors.blueAccent
+                                      : Colors.grey[700]!,
+                                  width: 2,
+                                ),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Icon(
+                                _deviceIcons[index],
+                                color: isSelected
+                                    ? Colors.blueAccent
+                                    : Colors.grey,
+                                size: 32,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 40),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 55,
+                      child: FilledButton(
+                        onPressed: _saveSettings,
+                        style: FilledButton.styleFrom(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: const Text(
+                          'Save & Continue',
+                          style: TextStyle(fontSize: 18),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class DeviceControlPage extends StatefulWidget {
+  final SharedPreferences prefs;
+  const DeviceControlPage({super.key, required this.prefs});
+
+  @override
+  State<DeviceControlPage> createState() => _DeviceControlPageState();
+}
+
+class _DeviceControlPageState extends State<DeviceControlPage> {
+  late MqttServerClient client;
+  late String ipAddress;
+  late String controlTopic;
+  late String statusTopic;
+  late IconData deviceIcon;
+
+  bool isConnected = false;
+  bool isDeviceOn = false;
+  String connectionStatus = 'Connecting...';
+
+  final List<IconData> _deviceIcons = [
+    Icons.lightbulb_outline,
+    Icons.power,
+    Icons.tv,
+    Icons.ac_unit,
+    Icons.router,
+    Icons.desktop_windows,
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
     _connectMQTT();
   }
 
+  void _loadSettings() {
+    ipAddress = widget.prefs.getString('mqtt_ip') ?? '';
+    controlTopic =
+        widget.prefs.getString('control_topic') ?? 'smartlamp/control';
+    statusTopic = widget.prefs.getString('status_topic') ?? 'smartlamp/status';
+    int iconIdx = widget.prefs.getInt('device_icon') ?? 0;
+
+    if (iconIdx < 0 || iconIdx >= _deviceIcons.length) iconIdx = 0;
+    deviceIcon = _deviceIcons[iconIdx];
+  }
+
   Future<void> _connectMQTT() async {
+    if (ipAddress.isEmpty) return;
+
     setState(() {
       connectionStatus = 'Connecting...';
     });
 
+    client = MqttServerClient(
+      ipAddress,
+      'app_client_${DateTime.now().millisecondsSinceEpoch}',
+    );
     client.port = 1883;
     client.logging(on: false);
     client.keepAlivePeriod = 60;
@@ -62,28 +414,26 @@ class _LampControlPageState extends State<LampControlPage> {
 
     final connMess = MqttConnectMessage()
         .withClientIdentifier(
-          'smartlamp_app_client_${DateTime.now().millisecondsSinceEpoch}',
+          'app_client_${DateTime.now().millisecondsSinceEpoch}',
         )
         .withWillQos(MqttQos.atLeastOnce);
     client.connectionMessage = connMess;
 
     try {
-      await client.connect();
+      await client.connect().timeout(const Duration(seconds: 5));
     } catch (e) {
-      debugPrint('Exception connecting to MQTT: $e');
+      debugPrint('Exception: $e');
       client.disconnect();
     }
 
-    if (client.connectionStatus!.state == MqttConnectionState.connected) {
+    if (client.connectionStatus?.state == MqttConnectionState.connected) {
       setState(() {
         isConnected = true;
         connectionStatus = 'Connected';
       });
 
-      // Subscribe to the status topic
       client.subscribe(statusTopic, MqttQos.atMostOnce);
 
-      // Listen for updates
       client.updates!.listen((List<MqttReceivedMessage<MqttMessage?>>? c) {
         if (c != null && c.isNotEmpty) {
           final MqttPublishMessage recMess = c[0].payload as MqttPublishMessage;
@@ -93,7 +443,7 @@ class _LampControlPageState extends State<LampControlPage> {
 
           if (c[0].topic == statusTopic) {
             setState(() {
-              isLampOn =
+              isDeviceOn =
                   payload.toUpperCase() == 'ON' ||
                   payload == '1' ||
                   payload.toLowerCase() == 'true';
@@ -103,42 +453,54 @@ class _LampControlPageState extends State<LampControlPage> {
       });
     } else {
       setState(() {
-        connectionStatus = 'Failed to connect';
+        connectionStatus = 'Disconnected';
         isConnected = false;
       });
-      client.disconnect();
     }
   }
 
   void onConnected() {
-    debugPrint('MQTT Connected');
+    debugPrint('Connected');
   }
 
   void onDisconnected() {
-    debugPrint('MQTT Disconnected');
+    debugPrint('Disconnected');
     setState(() {
       isConnected = false;
       connectionStatus = 'Disconnected';
-      isLampOn = false;
+      isDeviceOn = false;
     });
   }
 
-  void toggleLamp() {
-    if (!isConnected) return;
+  void toggleDevice() {
+    if (!isConnected) {
+      Fluttertoast.showToast(
+        msg: 'Not connected to MQTT Broker. Please reconnect.',
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+      );
+      return;
+    }
 
-    final bool newState = !isLampOn;
-    // We send 'ON' or 'OFF'.
+    final bool newState = !isDeviceOn;
     final String payload = newState ? 'ON' : 'OFF';
 
     final builder = MqttClientPayloadBuilder();
     builder.addString(payload);
-
     client.publishMessage(controlTopic, MqttQos.exactlyOnce, builder.payload!);
 
-    // Optimistic UI update
     setState(() {
-      isLampOn = newState;
+      isDeviceOn = newState;
     });
+  }
+
+  void _openSettings() {
+    client.disconnect();
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (context) => SettingsPage(prefs: widget.prefs),
+      ),
+    );
   }
 
   @override
@@ -149,16 +511,19 @@ class _LampControlPageState extends State<LampControlPage> {
 
   @override
   Widget build(BuildContext context) {
-    final bgColor = isLampOn ? Colors.amber[50] : Colors.grey[900];
-    final titleColor = isLampOn ? Colors.black : Colors.white;
+    final activeColor = Colors.blueAccent;
 
     return Scaffold(
-      backgroundColor: bgColor,
       appBar: AppBar(
-        title: Text('Smart Lamp Control', style: TextStyle(color: titleColor)),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
+        title: const Text('Device Control'),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: _openSettings,
+            tooltip: 'Settings',
+          ),
+        ],
       ),
       body: Center(
         child: Column(
@@ -188,51 +553,73 @@ class _LampControlPageState extends State<LampControlPage> {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
+                  if (!isConnected && connectionStatus != 'Connecting...') ...[
+                    const SizedBox(width: 8),
+                    InkWell(
+                      onTap: _connectMQTT,
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: Colors.red.withOpacity(0.2),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.refresh,
+                          color: Colors.red,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
             const SizedBox(height: 80),
             GestureDetector(
-              onTap: toggleLamp,
+              onTap: toggleDevice,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 300),
-                width: 250,
-                height: 250,
+                width: 220,
+                height: 220,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: isLampOn ? Colors.amber : Colors.grey[800],
+                  color: isDeviceOn ? activeColor : const Color(0xFF2C2C2E),
                   boxShadow: [
-                    if (isLampOn)
+                    if (isDeviceOn)
                       BoxShadow(
-                        color: Colors.amber.withOpacity(0.6),
-                        blurRadius: 60,
-                        spreadRadius: 20,
+                        color: activeColor.withOpacity(0.6),
+                        blurRadius: 50,
+                        spreadRadius: 15,
                       )
                     else
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.3),
-                        blurRadius: 20,
-                        spreadRadius: 5,
+                        color: Colors.black.withOpacity(0.5),
+                        blurRadius: 15,
+                        spreadRadius: 2,
                       ),
                   ],
                 ),
                 child: Center(
-                  child: Icon(
-                    Icons.lightbulb_outline,
-                    size: 120,
-                    color: isLampOn ? Colors.white : Colors.grey[600],
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 300),
+                    child: Icon(
+                      deviceIcon,
+                      key: ValueKey<bool>(isDeviceOn),
+                      size: 100,
+                      color: isDeviceOn ? Colors.white : Colors.grey[600],
+                    ),
                   ),
                 ),
               ),
             ),
             const SizedBox(height: 60),
             Text(
-              isLampOn ? 'POWER: ON' : 'POWER: OFF',
+              isDeviceOn ? 'DEVICE ON' : 'DEVICE OFF',
               style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.w900,
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
                 letterSpacing: 2,
-                color: isLampOn ? Colors.amber[900] : Colors.grey[500],
+                color: isDeviceOn ? activeColor : Colors.grey[500],
               ),
             ),
           ],
